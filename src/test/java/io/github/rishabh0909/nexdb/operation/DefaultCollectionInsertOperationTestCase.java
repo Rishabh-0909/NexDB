@@ -1,0 +1,304 @@
+package io.github.rishabh0909.nexdb.operation;
+
+import io.github.rishabh0909.nexdb.utils.FileUtils;
+import io.github.rishabh0909.nexdb.context.EngineConfig;
+import io.github.rishabh0909.nexdb.exception.DeserializationException;
+import io.github.rishabh0909.nexdb.exception.IndexExistsException;
+import io.github.rishabh0909.nexdb.exception.InternalOperationException;
+import io.github.rishabh0909.nexdb.exception.SerializationException;
+import io.github.rishabh0909.nexdb.operation.*;
+import io.github.rishabh0909.nexdb.operation.query.Operation;
+import io.github.rishabh0909.nexdb.operation.query.Query;
+import io.github.rishabh0909.nexdb.operation.query.SimpleCondition;
+import io.github.rishabh0909.nexdb.scheme.ModelToCollectionConverter;
+import io.github.rishabh0909.nexdb.scheme.Scheme;
+import io.github.rishabh0909.nexdb.scheme.annotation.Collection;
+import io.github.rishabh0909.nexdb.scheme.annotation.Field;
+import io.github.rishabh0909.nexdb.scheme.annotation.Index;
+import io.github.rishabh0909.nexdb.serialization.ModelSerializer;
+import io.github.rishabh0909.nexdb.storage.db.DatabaseStorageManager;
+import io.github.rishabh0909.nexdb.storage.db.DatabaseStorageManagerSingletonFactory;
+import io.github.rishabh0909.nexdb.storage.index.DefaultIndexStorageManagerSingletonFactory;
+import io.github.rishabh0909.nexdb.storage.index.IndexStorageManagerSingletonFactory;
+import io.github.rishabh0909.nexdb.storage.index.header.JsonIndexHeaderManager;
+import io.github.rishabh0909.nexdb.storage.pool.FileHandlerPoolSingletonFactory;
+import io.github.rishabh0909.nexdb.utils.ReaderWriterLock;
+import lombok.*;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.Iterator;
+import java.util.List;
+import java.util.concurrent.ExecutionException;
+
+public class DefaultCollectionInsertOperationTestCase {
+
+    private EngineConfig engineConfig;
+    private Path dbPath;
+
+    private FileHandlerPoolSingletonFactory fileHandlerPoolSingletonFactory;
+
+    @BeforeEach
+    public void setUp() throws IOException {
+        this.dbPath = Files.createTempDirectory(this.getClass().getSimpleName());
+        this.engineConfig = EngineConfig.builder()
+                .clusterKeyType(EngineConfig.ClusterKeyType.LONG)
+                .baseDBPath(this.dbPath.toString())
+                .build();
+        this.fileHandlerPoolSingletonFactory = new FileHandlerPoolSingletonFactory.DefaultFileHandlerPoolSingletonFactory(engineConfig);
+    }
+
+    private DatabaseStorageManagerSingletonFactory getDatabaseStorageManagerFactory() {
+        return new DatabaseStorageManagerSingletonFactory.DiskPageDatabaseStorageManagerSingletonFactory(engineConfig, fileHandlerPoolSingletonFactory);
+    }
+
+    @AfterEach
+    public void destroy() throws IOException {
+        FileUtils.deleteDirectory(dbPath.toString());
+    }
+
+
+    @Data
+    @Collection(id = 1, name = "test")
+    @Builder
+    @EqualsAndHashCode
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class TestModel {
+        @Field(id = 1)
+        @Index(primary = true, autoIncrement = true)
+        private Integer id;
+
+        @Field(id = 2, maxLength = 20)
+        private String name;
+
+        @Field(id = 3)
+        @Index()
+        private Long age;
+
+        @Field(id = 4, name = "country_code")
+        @Index(lowCardinality = true)
+        private String country;
+
+    }
+
+    @Data
+    @Collection(id = 1, name = "test")
+    @Builder
+    @EqualsAndHashCode
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class NullableTestModel {
+        @Field(id = 1)
+        @Index(primary = true, autoIncrement = true)
+        private Integer id;
+
+        @Field(id = 2, maxLength = 20)
+        private String name;
+
+        @Field(id = 3, nullable = true)
+        @Index()
+        private Long age;
+
+        @Field(id = 4, name = "country_code", nullable = true)
+        @Index(lowCardinality = true)
+        private String country;
+    }
+
+
+
+    @Test
+    public void test() throws IOException, SerializationException, ExecutionException, InterruptedException, InternalOperationException, DeserializationException {
+        DatabaseStorageManagerSingletonFactory databaseStorageManagerSingletonFactory = getDatabaseStorageManagerFactory();
+        DatabaseStorageManager storageManager = databaseStorageManagerSingletonFactory.getInstance();
+        IndexStorageManagerSingletonFactory indexStorageManagerSingletonFactory = new DefaultIndexStorageManagerSingletonFactory(this.engineConfig, new JsonIndexHeaderManager.SingletonFactory(), fileHandlerPoolSingletonFactory, databaseStorageManagerSingletonFactory);
+
+        Scheme scheme = Scheme.builder()
+                .dbName("test")
+                .version(1)
+                .build();
+        Scheme.Collection collection = new ModelToCollectionConverter(TestModel.class).toCollection();
+        scheme.getCollections().add(collection);
+
+        CollectionIndexProviderSingletonFactory collectionIndexProviderSingletonFactory = new DefaultCollectionIndexProviderSingletonFactory(scheme, engineConfig, indexStorageManagerSingletonFactory, storageManager);
+
+        TestModel testModel1 = TestModel.builder().id(1).age(10L).country("DE").name("John").build();
+        TestModel testModel2 = TestModel.builder().id(2).age(20L).country("FR").name("Rose").build();
+        TestModel testModel3 = TestModel.builder().id(3).age(30L).country("USA").name("Jack").build();
+        TestModel testModel4 = TestModel.builder().id(4).age(40L).country("GB").name("Foo").build();
+
+        ReaderWriterLock readerWriterLock = new ReaderWriterLock();
+        CollectionInsertOperation<Long> collectionInsertOperation = new DefaultCollectionInsertOperation<>(scheme, collection, readerWriterLock, collectionIndexProviderSingletonFactory.getInstance(collection), storageManager);
+        CollectionDeleteOperation<Long> collectionDeleteOperation = new DefaultCollectionDeleteOperation<>(collection, readerWriterLock, collectionIndexProviderSingletonFactory.getInstance(collection), storageManager);
+
+        for (TestModel testModel : Arrays.asList(testModel1, testModel2, testModel3, testModel4)) {
+            collectionInsertOperation.execute(testModel);
+        }
+
+        CollectionSelectOperation<Long> collectionSelectOperation = new DefaultCollectionSelectOperation<>(collection, readerWriterLock, collectionIndexProviderSingletonFactory.getInstance(collection), storageManager);
+        long count = collectionSelectOperation.count();
+        Assertions.assertEquals(4L, count);
+        Iterator<TestModel> execute = collectionSelectOperation.execute(TestModel.class);
+        Assertions.assertTrue(execute.hasNext());
+        Assertions.assertEquals(execute.next(), testModel1);
+        Assertions.assertTrue(execute.hasNext());
+        Assertions.assertEquals(execute.next(), testModel2);
+        Assertions.assertTrue(execute.hasNext());
+        Assertions.assertEquals(execute.next(), testModel3);
+        Assertions.assertTrue(execute.hasNext());
+        Assertions.assertEquals(execute.next(), testModel4);
+        Assertions.assertFalse(execute.hasNext());
+
+        execute = collectionSelectOperation.query(
+                new Query().where(new SimpleCondition<>("age", Operation.GT, 10L))
+        ).execute(TestModel.class);
+        Assertions.assertTrue(execute.hasNext());
+        Assertions.assertEquals(execute.next(), testModel2);
+        Assertions.assertTrue(execute.hasNext());
+        Assertions.assertEquals(execute.next(), testModel3);
+        Assertions.assertTrue(execute.hasNext());
+        Assertions.assertEquals(execute.next(), testModel4);
+        Assertions.assertFalse(execute.hasNext());
+
+
+        long deleted = collectionDeleteOperation.execute();
+        Assertions.assertEquals(4, deleted);
+
+    }
+
+
+    @Test
+    public void test_autoIncrement() throws SerializationException, InternalOperationException, DeserializationException {
+        DatabaseStorageManagerSingletonFactory databaseStorageManagerSingletonFactory = getDatabaseStorageManagerFactory();
+        DatabaseStorageManager storageManager = databaseStorageManagerSingletonFactory.getInstance();
+        IndexStorageManagerSingletonFactory indexStorageManagerSingletonFactory = new DefaultIndexStorageManagerSingletonFactory(this.engineConfig, new JsonIndexHeaderManager.SingletonFactory(), fileHandlerPoolSingletonFactory, databaseStorageManagerSingletonFactory);
+
+        Scheme scheme = Scheme.builder()
+                .dbName("test")
+                .version(1)
+                .build();
+
+        Scheme.Collection collection = new ModelToCollectionConverter(TestModel.class).toCollection();
+        scheme.getCollections().add(collection);
+
+
+        CollectionIndexProviderSingletonFactory collectionIndexProviderSingletonFactory = new DefaultCollectionIndexProviderSingletonFactory(scheme, engineConfig, indexStorageManagerSingletonFactory, storageManager);
+        ReaderWriterLock readerWriterLock = new ReaderWriterLock();
+        CollectionInsertOperation<Long> collectionInsertOperation = new DefaultCollectionInsertOperation<>(scheme, collection, readerWriterLock, collectionIndexProviderSingletonFactory.getInstance(collection), storageManager);
+        CollectionSelectOperation<Long> collectionSelectOperation = new DefaultCollectionSelectOperation<>(collection, readerWriterLock, collectionIndexProviderSingletonFactory.getInstance(collection), storageManager);
+
+        TestModel testModel1 = TestModel.builder().age(10L).country("DE").name("John").build();
+        TestModel testModel2 = TestModel.builder().age(20L).country("FR").name("Rose").build();
+
+        testModel1 = collectionInsertOperation.execute(testModel1);
+        Assertions.assertNotNull(testModel1.getId());
+        Assertions.assertEquals(1, testModel1.getId());
+
+        testModel2 = collectionInsertOperation.execute(testModel2);
+        Assertions.assertNotNull(testModel2.getId());
+        Assertions.assertEquals(2, testModel2.getId());
+
+        List<TestModel> idEQ1s = collectionSelectOperation.query(new Query("id", Operation.EQ, 1)).asList(TestModel.class);
+        Assertions.assertEquals(1, idEQ1s.size());
+        Assertions.assertEquals(testModel1, idEQ1s.getFirst());
+
+        List<TestModel> idEQ2s = collectionSelectOperation.query(new Query("id", Operation.EQ, 2)).asList(TestModel.class);
+        Assertions.assertEquals(1, idEQ2s.size());
+        Assertions.assertEquals(testModel2, idEQ2s.getFirst());
+
+    }
+
+
+    @Test
+    public void test_nullable() throws SerializationException, InternalOperationException, DeserializationException {
+        DatabaseStorageManagerSingletonFactory databaseStorageManagerSingletonFactory = getDatabaseStorageManagerFactory();
+        DatabaseStorageManager storageManager = databaseStorageManagerSingletonFactory.getInstance();
+        IndexStorageManagerSingletonFactory indexStorageManagerSingletonFactory = new DefaultIndexStorageManagerSingletonFactory(this.engineConfig, new JsonIndexHeaderManager.SingletonFactory(), fileHandlerPoolSingletonFactory, databaseStorageManagerSingletonFactory);
+
+        Scheme scheme = Scheme.builder()
+                .dbName("test")
+                .version(1)
+                .build();
+        Scheme.Collection collection = new ModelToCollectionConverter(NullableTestModel.class).toCollection();
+        scheme.getCollections().add(collection);
+
+        CollectionIndexProviderSingletonFactory collectionIndexProviderSingletonFactory = new DefaultCollectionIndexProviderSingletonFactory(scheme, engineConfig, indexStorageManagerSingletonFactory, storageManager);
+
+        NullableTestModel m1 = NullableTestModel.builder()
+                .id(1)
+                .name("John")
+                .age(null)
+                .country("DE")
+                .build();
+        NullableTestModel m2 = NullableTestModel.builder()
+                .id(2)
+                .name("Rose")
+                .age(20L)
+                .build();
+
+
+        ReaderWriterLock readerWriterLock = new ReaderWriterLock();
+        CollectionInsertOperation<Long> collectionInsertOperation = new DefaultCollectionInsertOperation<>(scheme, collection, readerWriterLock, collectionIndexProviderSingletonFactory.getInstance(collection), storageManager);
+        CollectionSelectOperation<Long> collectionSelectOperation = new DefaultCollectionSelectOperation<>(collection, readerWriterLock, collectionIndexProviderSingletonFactory.getInstance(collection), storageManager);
+
+        for (NullableTestModel testModel : Arrays.asList(m1, m2)) {
+            collectionInsertOperation.execute(testModel);
+        }
+
+        List<NullableTestModel> nullCountries = collectionSelectOperation.query(new Query("country_code", Operation.IS_NULL)).asList(NullableTestModel.class);
+        Assertions.assertEquals(1, nullCountries.size());
+        Assertions.assertEquals(m2, nullCountries.getFirst());
+        Assertions.assertNull(m2.country);
+
+        List<NullableTestModel> nullAges = collectionSelectOperation.query(new Query("age", Operation.IS_NULL)).asList(NullableTestModel.class);
+        Assertions.assertEquals(1, nullAges.size());
+        Assertions.assertEquals(m1, nullAges.getFirst());
+        Assertions.assertNull(m1.age);
+    }
+
+    @AllArgsConstructor
+    @NoArgsConstructor
+    @Data
+    @Collection(id = 1)
+    public static class UniqueModel {
+        @Field(id=1)
+        @Index(unique=true)
+        private Integer uq;
+    }
+
+    @Test
+    public void failUnique() throws SerializationException, InternalOperationException, DeserializationException {
+        DatabaseStorageManagerSingletonFactory databaseStorageManagerSingletonFactory = getDatabaseStorageManagerFactory();
+        DatabaseStorageManager storageManager = databaseStorageManagerSingletonFactory.getInstance();
+        IndexStorageManagerSingletonFactory indexStorageManagerSingletonFactory = new DefaultIndexStorageManagerSingletonFactory(this.engineConfig, new JsonIndexHeaderManager.SingletonFactory(), fileHandlerPoolSingletonFactory, databaseStorageManagerSingletonFactory);
+
+        Scheme scheme = Scheme.builder()
+                .dbName("test")
+                .version(1)
+                .build();
+
+        Scheme.Collection collection = new ModelToCollectionConverter(UniqueModel.class).toCollection();
+        scheme.getCollections().add(collection);
+
+
+        CollectionIndexProviderSingletonFactory collectionIndexProviderSingletonFactory = new DefaultCollectionIndexProviderSingletonFactory(scheme, engineConfig, indexStorageManagerSingletonFactory, storageManager);
+        ReaderWriterLock readerWriterLock = new ReaderWriterLock();
+        CollectionInsertOperation<Long> collectionInsertOperation = new DefaultCollectionInsertOperation<>(scheme, collection, readerWriterLock, collectionIndexProviderSingletonFactory.getInstance(collection), storageManager);
+
+        UniqueModel model1 = new UniqueModel(1);
+        UniqueModel model2 = new UniqueModel(1);
+
+        collectionInsertOperation.execute(new ModelSerializer(model1).serialize());
+        Assertions.assertThrowsExactly(IndexExistsException.class, () -> {
+            collectionInsertOperation.execute(new ModelSerializer(model2).serialize());
+        });
+
+    }
+
+}
